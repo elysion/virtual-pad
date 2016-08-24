@@ -1,0 +1,31 @@
+{
+  "name": "virtual-pad",
+  "version": "1.0.0",
+  "description": "VirtualPad",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron main.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elysion/virtual-pad.git"
+  },
+  "keywords": [
+    "MIDI",
+    "Electron",
+    "React"
+  ],
+  "author": "GitHub",
+  "license": "CC0-1.0",
+  "devDependencies": {
+    "electron-prebuilt": "^0.37.8"
+  },
+  "dependencies": {
+    "baconjs": "^0.7.85",
+    "midi": "^0.9.5",
+    "partial.lenses": "^3.8.0",
+    "ramda": "^0.22.1",
+    "react": "^15.3.1",
+    "react-dom": "^15.3.1"
+  }
+}
