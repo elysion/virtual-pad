@@ -8,9 +8,14 @@ const P = L.default
 const midi = require('midi');
 const midiHelpers = require('./lib/midiHelpers')
 const { ClockTick, ClockStart } = require('./lib/midiMessages')
-const { SkipForwardCommand, SkipBackwardCommand } = require('./jumpCommands')
+const { Jump, Size } = require('./jumpCommands')
 
-const gridWidth = 16
+const ForwardVelocity = 0x01
+const BackwardVelocity = 0x7f
+
+const sizeInBeats = 4
+const stepSize = 0.25
+const gridWidth = sizeInBeats / stepSize
 const gridHeight = gridWidth
 
 const cellLens = (row, col) => P(row, col, 'on')
@@ -21,8 +26,6 @@ const turnOffAllInColumn = col => data => L.set(columnLens(col), false, data)
 const toggleBus = new Bacon.Bus()
 
 const midiInputSelected = new Bacon.Bus()
-midiInputSelected.log('value')
-// Set up a new clockInput.
 const clockInput = new midi.input()
 clockInput.ignoreTypes(false, false, false)
 
@@ -59,7 +62,7 @@ const Cell = React.createClass({
   render: function () {
     return h.td({
       style: {
-        width: 20, //`${Math.floor(100 / this.props.row.length)}%`,
+        width: 20,
         height: 20,
         backgroundColor: this.props.cell.on ? 'yellow' : 'gray',
         opacity: this.props.highlight ? 1 : 0.7
@@ -71,9 +74,9 @@ const Cell = React.createClass({
 
 const playbackPositionStream = clock
   .scan(0, (ticks, tick) => tick === ClockStart ? 0 : ticks + 1)
-  .map(ticks => Math.floor(ticks / (24 / 2)))
+  .map(ticks => Math.floor(ticks / (24 * stepSize)))
   .skipDuplicates()
-  .map(beats => beats % gridWidth)//Bacon.interval(1000).scan(0, i => ++i).map(i => i % 8)
+  .map(steps => steps % (sizeInBeats/stepSize))
 
 const table = R.times(row => R.times(col => ({ on: row === col }), gridWidth), gridHeight)
 
@@ -87,15 +90,14 @@ const playbackData = Bacon.combineTemplate({
 
 const currentPosition = cellStateStream.sampledBy(playbackPositionStream, (cellStates, playbackPosition) => {
   const cellsInColumn = L.collect(columnLens(playbackPosition), cellStates)
-  return cellsInColumn.findIndex(R.identity)
+  return cellsInColumn.findIndex(R.identity)// + (playbackPosition === 0 ? gridWidth : 0)
 })
 
 const jumpCommands = currentPosition
   .slidingWindow(2)
-  .filter(playbackPositionStream.map(R.complement(R.equals(0))))
   .map(([previous, next]) => next - previous - 1)
+  .combine(playbackPositionStream, (diff, playback) => (diff + (playback === 0 ? gridWidth : 0)))
   .filter(R.complement(R.equals(NaN)))
-  .map(value => R.times(() => value > 0 ? SkipForwardCommand : SkipBackwardCommand, Math.abs(value)))
 
 const PadGrid = React.createClass({
   render: function () {
@@ -121,39 +123,58 @@ playbackData.onValue(({ cellStates, playbackPosition }) =>
     document.getElementById('content')))
 
 const sendCommand = message => {
-  // console.log('sending', message)
   output.sendMessage(message)
 }
 
 const backwardButtonClicked = new Bacon.Bus()
 const forwardButtonClicked = new Bacon.Bus()
+const sizeButtonClicked = new Bacon.Bus()
+const jumpButtonClicked = new Bacon.Bus()
+
+const sizeToVelocity = size =>
+  size == 8 ? 90 : size == 4 ? 80 : size == 2 ? 70 : size == 1 ? 60 : size == 0.5 ? 50 : 40
+
+sizeButtonClicked.map(sizeToVelocity).onValue(velocity => {
+  sendCommand(R.append(velocity, Size))
+})
+
+jumpButtonClicked.onValue(() => {
+  sendCommand(R.append(0x01, Jump))
+})
 
 Bacon.mergeAll(
   jumpCommands,
-  backwardButtonClicked.map([SkipBackwardCommand]),
-  forwardButtonClicked.map([SkipForwardCommand]))
-  .map(R.chain(R.identity))
-  .map(value => value > 1 ? value + 1 : value)
-  .delay(5)
+  backwardButtonClicked.map(-1),
+  forwardButtonClicked.map(1))
   .filter(active.toProperty())
+  .map(a => a * stepSize)
   .onValue(messages => {
-    const sendNextMessage = (nextMessages) => {
-      if (nextMessages.length === 0) return
-      sendCommand(R.head(nextMessages))
-      setTimeout(sendNextMessage, 5, R.tail(nextMessages))
+    const sendNextMessage = (jump) => {
+      if (jump === 0) return
+      const multiplier = jump > 0 ? 1 : -1
+      const jumpCommand = R.append(jump > 0 ? ForwardVelocity : BackwardVelocity, Jump)
+      const jumpSize = Math.abs(jump)
+      const size = jumpSize >= 8 ? 8 : jumpSize >= 4 ? 4 : jumpSize >= 2 ? 2 : jumpSize >= 1 ? 1 : jumpSize >= 0.5 ? 0.5 : 0.25
+      const velocity = sizeToVelocity(size)
+      sendCommand(R.append(velocity, Size))
+      sendCommand(jumpCommand)
+      setTimeout(sendNextMessage, 10, jump - (size*multiplier))
     }
+
     sendNextMessage(messages)
   })
 
 const Devices = React.createClass({
   render: function () {
+    const sizeCallback = size => R.partial(this.props.sizeButtonCb, [size])
+
     return h.div({}, h.label({},
       'MIDI input device:',
       h.select({ onChange: e => this.props.selectionCb(parseInt(e.target.value)) },
         this.props.devices.map((device, index) => h.option({ key: `device-${index}`, value: index }, device)))
       ),
-      h.button({ onClick: this.props.backwardButtonCb }, 'Back'),
-      h.button({ onClick: this.props.forwardButtonCb }, 'Forward'),
+      h.button({ onClick: sizeCallback(1) }, 'Size'),
+      h.button({ onClick: this.props.jumpButtonCb }, 'Jump'),
       h.label({}, 'Active:', h.input({
         onClick: e => this.props.activeCb(e.target.checked),
         type: 'checkbox',
@@ -167,8 +188,8 @@ active.toProperty(false).onValue(active =>
       devices: midiHelpers.listMidiInputPorts(),
       selectionCb: midiInputSelected.push.bind(midiInputSelected),
       activeCb: activeBus.push.bind(activeBus),
-      backwardButtonCb: backwardButtonClicked.push.bind(backwardButtonClicked),
-      forwardButtonCb: forwardButtonClicked.push.bind(forwardButtonClicked),
+      jumpButtonCb: jumpButtonClicked.push.bind(jumpButtonClicked),
+      sizeButtonCb: sizeButtonClicked.push.bind(sizeButtonClicked),
       active
     }),
     document.getElementById('devices')))
